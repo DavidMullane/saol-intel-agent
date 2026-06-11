@@ -10,7 +10,6 @@ from google.genai import types
 st.set_page_config(page_title="Studio Saol | Connected Intel Engine", layout="wide")
 
 # --- NOTION API CONFIGURATION ---
-# These tokens will be safely stored in Streamlit's Advanced Secrets Manager
 NOTION_TOKEN = st.secrets.get("NOTION_TOKEN", "")
 NOTION_DATABASE_ID = st.secrets.get("NOTION_DATABASE_ID", "")
 
@@ -19,6 +18,11 @@ HEADERS = {
     "Content-Type": "application/json",
     "Notion-Version": "2022-06-28"
 }
+
+def chunk_text_for_notion(text: str, max_chunk_size: int = 1900):
+    """Breaks a long string into an array of rich text objects to bypass Notion's 2000 char cell limit."""
+    chunks = [text[i:i + max_chunk_size] for i in range(0, len(text), max_chunk_size)]
+    return [{"text": {"content": chunk}} for chunk in chunks]
 
 def load_historical_memory_from_notion(competitor_name: str) -> str:
     """Queries the Notion Database for an existing competitor entry to pull past context."""
@@ -40,11 +44,11 @@ def load_historical_memory_from_notion(competitor_name: str) -> str:
         if response.status_code == 200:
             results = response.json().get("results", [])
             if results:
-                # Extract the historical markdown text stored in the 'Intelligence Brief' property
                 properties = results[0].get("properties", {})
-                brief_content = properties.get("Intelligence Brief", {}).get("rich_text", [])
-                if brief_content:
-                    return brief_content[0].get("text", {}).get("content", "")
+                brief_components = properties.get("Intelligence Brief", {}).get("rich_text", [])
+                if brief_components:
+                    # Stitch the chunks back together
+                    return "".join([chunk.get("text", {}).get("content", "") for chunk in brief_components])
         return "No historical baseline recorded in Notion yet."
     except Exception:
         return "Error connecting to Notion. Proceeding with fresh landscape search."
@@ -54,7 +58,6 @@ def save_historical_memory_to_notion(competitor_name: str, industry: str, data_t
     if not NOTION_TOKEN or not NOTION_DATABASE_ID:
         return
 
-    # Check if page already exists to update it, otherwise create a new one
     query_url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
     payload = {"filter": {"property": "Competitor Name", "title": {"equals": competitor_name}}}
     
@@ -62,13 +65,13 @@ def save_historical_memory_to_notion(competitor_name: str, industry: str, data_t
         query_res = requests.post(query_url, json=payload, headers=HEADERS)
         results = query_res.json().get("results", [])
         
-        # Notion text property chunking limit safety (caps at 2000 chars per element)
-        truncated_text = data_text[:2000]
+        # Safe chunking conversion to bypass Notion's 2000 limit cleanly
+        rich_text_payload = chunk_text_for_notion(data_text)
 
         page_properties = {
             "Competitor Name": {"title": [{"text": {"content": competitor_name}}]},
             "Industry Vertical": {"select": {"name": industry}},
-            "Intelligence Brief": {"rich_text": [{"text": {"content": truncated_text}}]}
+            "Intelligence Brief": {"rich_text": rich_text_payload}
         }
 
         if results:
@@ -77,7 +80,6 @@ def save_historical_memory_to_notion(competitor_name: str, industry: str, data_t
             url = f"https://api.notion.com/v1/pages/{page_id}"
             res = requests.patch(url, json={"properties": page_properties}, headers=HEADERS)
             
-            # DIAGNOSTIC CHECK: Catch an update failure from Notion
             if res.status_code != 200:
                 st.error(f"Notion Update Error ({res.status_code}): {res.text}")
         else:
@@ -89,7 +91,6 @@ def save_historical_memory_to_notion(competitor_name: str, industry: str, data_t
             }
             res = requests.post(url, json=new_page_payload, headers=HEADERS)
             
-            # DIAGNOSTIC CHECK: Catch a creation failure from Notion
             if res.status_code != 200:
                 st.error(f"Notion Creation Error ({res.status_code}): {res.text}")
                 
@@ -100,7 +101,6 @@ def save_historical_memory_to_notion(competitor_name: str, industry: str, data_t
 def run_automated_dashboard(client_name: str, competitor_name: str, industry: str, focus_area: str):
     client = genai.Client()
     
-    # 1. READ FROM THE PERMANENT NOTION LEDGER
     past_memory = load_historical_memory_from_notion(competitor_name)
     
     system_instruction = (
@@ -124,7 +124,7 @@ def run_automated_dashboard(client_name: str, competitor_name: str, industry: st
     MARKET FOCUS: {focus_area}
     HISTORICAL MEMORY (Synthesize and build upon this baseline):\n{past_memory}
     
-    INSTRUCTIONS: Perform a fresh search for recent Q1 2026 data. Synthesize old and new facts into formal Markdown tables and lists based on the rules.
+    INSTRUCTIONS: Perform a fresh search for recent data. Synthesize old and new facts into formal Markdown tables and lists based on the rules.
     """
     
     response = client.models.generate_content(
@@ -137,7 +137,6 @@ def run_automated_dashboard(client_name: str, competitor_name: str, industry: st
         )
     )
     
-    # 2. WRITE BACK TO THE PERMANENT NOTION LEDGER
     save_historical_memory_to_notion(competitor_name, industry, response.text)
     return response.text
 
@@ -156,7 +155,7 @@ with st.sidebar:
     generate_btn = st.button("🚀 Run Intelligence Sweep", type="primary")
 
 if generate_btn:
-    with st.spinner(f"Querying Notion database & scanning live 2026 web layers for {competitor_input}..."):
+    with st.spinner(f"Querying Notion database & scanning live web layers for {competitor_input}..."):
         try:
             raw_markdown = run_automated_dashboard(client_input, competitor_input, industry_input, focus_input)
             html_body = markdown.markdown(raw_markdown, extensions=['tables'])
