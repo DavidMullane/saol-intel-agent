@@ -62,7 +62,7 @@ def save_historical_memory_to_notion(competitor_name: str, industry: str, data_t
         query_res = requests.post(query_url, json=payload, headers=HEADERS)
         results = query_res.json().get("results", [])
         
-        # Notion text property chunking limit safety (caps at 2000 chars per element, we use the first 2000 for summary context)
+        # Notion text property chunking limit safety (caps at 2000 chars per element)
         truncated_text = data_text[:2000]
 
         page_properties = {
@@ -75,7 +75,11 @@ def save_historical_memory_to_notion(competitor_name: str, industry: str, data_t
             # Update existing page
             page_id = results[0]["id"]
             url = f"https://api.notion.com/v1/pages/{page_id}"
-            requests.patch(url, json={"properties": page_properties}, headers=HEADERS)
+            res = requests.patch(url, json={"properties": page_properties}, headers=HEADERS)
+            
+            # DIAGNOSTIC CHECK: Catch an update failure from Notion
+            if res.status_code != 200:
+                st.error(f"Notion Update Error ({res.status_code}): {res.text}")
         else:
             # Create a completely new entry page in their DB
             url = "https://api.notion.com/v1/pages"
@@ -83,7 +87,12 @@ def save_historical_memory_to_notion(competitor_name: str, industry: str, data_t
                 "parent": {"database_id": NOTION_DATABASE_ID},
                 "properties": page_properties
             }
-            requests.post(url, json=new_page_payload, headers=HEADERS)
+            res = requests.post(url, json=new_page_payload, headers=HEADERS)
+            
+            # DIAGNOSTIC CHECK: Catch a creation failure from Notion
+            if res.status_code != 200:
+                st.error(f"Notion Creation Error ({res.status_code}): {res.text}")
+                
     except Exception as e:
         st.warning(f"Could not sync data to Notion: {e}")
 
@@ -152,7 +161,6 @@ if generate_btn:
             raw_markdown = run_automated_dashboard(client_input, competitor_input, industry_input, focus_input)
             html_body = markdown.markdown(raw_markdown, extensions=['tables'])
             
-            # (Your CSS layout code remains exactly the same here)
             styled_html = f"""
             <!DOCTYPE html>
             <html>
